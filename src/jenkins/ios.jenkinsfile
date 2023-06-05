@@ -1,0 +1,127 @@
+void setBuildStatus(String nativeUrl, String message, String state) {
+    step([
+        $class: "GitHubCommitStatusSetter",
+        reposSource: [$class: "ManuallyEnteredRepositorySource", url: nativeUrl],
+        contextSource: [$class: "ManuallyEnteredCommitContextSource", context: "ci/jenkins/ios"],
+        errorHandlers: [[$class: "ChangingBuildStatusErrorHandler", result: "UNSTABLE"]],
+        statusResultSource: [$class: "ConditionalStatusResultSource", results: [[$class: "AnyBuildResult", message: message, state: state]]]
+    ]);
+}
+pipeline {
+    agent any
+    options {
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr:"5"))
+        timeout(time: 40, unit: "MINUTES")
+    }
+    stages {
+        stage("BuildAndEnv"){
+            parallel {
+                stage("build") {
+                    agent{
+                        node {
+                            label "mac"
+                            customWorkspace "$env.iosCIPath/src"
+                        }
+                    }
+                    steps {
+                        echo "$GIT_COMMIT"
+                        sh "${iosCIPath}/buildSdk.sh ${GIT_COMMIT}"
+                    }
+                }
+                stage("startMcu") {
+                    agent{
+                        node {
+                            label "$env.iosServer"
+                        }
+                    }
+                    steps {
+                        withEnv(["JENKINS_NODE_COOKIE=dontkill"]) {
+                            sh "${env.starMcuScriptPath} --package-url ${env.mcuPackageUrl} --package-name \
+                            mcu-all-bin-v{data}.tgz  --base-dir ${env.mcuServerBasePath} --git-branch ${GIT_BRANCH}"
+                        }
+                    }
+                }
+                stage("startP2PServer") {
+                    agent{
+                        node {
+                            label "$env.iosServer"
+                        }
+                    }
+                    steps {
+                        withEnv(["JENKINS_NODE_COOKIE=dontkill"]) {
+                            sh "${env.startP2PServerScriptPath} --server-path ${env.p2pServerPath}"
+                        }
+                    }
+                }
+            }
+        }
+        stage("BulidConference") {
+            agent{
+                node {
+                    label "mac"
+                }
+            }
+            steps {
+                echo "Buliding.."
+                sh "${iosConferenceCasePath}/build.sh"
+            }
+        }
+        stage("BulidTestP2P") {
+            agent{
+                node {
+                    label "mac"
+                }
+            }
+            steps {
+                echo "Buliding.."
+                sh "${iosP2PCasePath}/build.sh"
+            }
+        }
+        stage("TestConference") {
+            agent{
+                node {
+                    label "mac"
+                }
+            }
+            steps {
+                echo "Testing.."
+                sh "${iosConferenceCasePath}/runTest.sh"
+            }
+        }
+        stage("TestP2P") {
+            agent{
+                node {
+                    label "mac"
+                }
+            }
+            steps {
+                echo "Testing.."
+                sh "${iosP2PCasePath}/runTest.sh"
+            }
+        }
+    }
+    post {
+        success {
+            setBuildStatus("${env.nativeUrl}", "Build succeeded", "SUCCESS");
+            echo "I succeeeded!"
+            mail to: "$env.mailtoUser",
+            subject: "Success Pipeline: ${currentBuild.fullDisplayName}",
+            body: "Success with ${env.BUILD_URL}"
+        }
+        unstable {
+            echo "I am unstable :/"
+            mail to: "$env.mailtoUser",
+            subject: "Failed Pipeline: ${currentBuild.fullDisplayName}",
+            body: "Something is wrong with ${env.BUILD_URL}"
+        }
+        failure {
+            setBuildStatus("${env.nativeUrl}", "Build failed", "FAILURE");
+            echo "I failed :("
+            mail to: "$env.mailtoUser",
+            subject: "Failed Pipeline: ${currentBuild.fullDisplayName}",
+            body: "Something is wrong with ${env.BUILD_URL}"
+        }
+    }
+}
+

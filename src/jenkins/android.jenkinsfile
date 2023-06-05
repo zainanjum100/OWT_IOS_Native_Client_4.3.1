@@ -1,0 +1,112 @@
+void setBuildStatus(String nativeUrl, String message, String state) {
+    step([
+        $class: "GitHubCommitStatusSetter",
+        reposSource: [$class: "ManuallyEnteredRepositorySource", url: nativeUrl],
+        contextSource: [$class: "ManuallyEnteredCommitContextSource", context: "ci/jenkins/android"],
+        errorHandlers: [[$class: "ChangingBuildStatusErrorHandler", result: "UNSTABLE"]],
+        statusResultSource: [$class: "ConditionalStatusResultSource", results: [[$class: "AnyBuildResult", message: message, state: state]]]
+    ]);
+}
+pipeline {
+    agent any
+    options {
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr:"5"))
+        timeout(time: 40, unit: "MINUTES")
+    }
+    stages {
+        stage('Build'){
+            agent{
+                node {
+                    label "${env.androidBuldNativeServer}"
+                    customWorkspace "${env.owtClientNativePath}"
+                }
+            }
+            steps {
+                script{
+                    sh "gclient sync"
+                    sh "python ${env.androidBuildNativePath}"
+                    sh "cp -r ${env.andoridWebrtcLibSrcPath}/* ${env.remoteDependeceDebugPath}/libwebrtc"
+                    if ("${GIT_BRANCH}" == 'master') { 
+                        sh "cp -r ${env.andoridWebrtcLibSrcPath}/* ${env.andoridLibWebrtcPath}"
+                    }
+                }
+            }
+        }
+        stage('startMCU'){
+            agent{
+                node {
+                    label "${env.mcuServer}"
+                }
+            }
+            steps {
+                script{
+                    withEnv(['JENKINS_NODE_COOKIE=dontkill']) {
+                        sh "python ${env.startServerScriptPath} --package-url ${env.mcuPackageBaseDir} --package-name \
+                        ${env.mcuPackageName}  --base-dir ${env.mcuServerBasePath} --git-branch ${GIT_BRANCH} \
+                        --owner open-webrtc-toolkit --repo owt-client-native --commit-id ${GIT_COMMIT} \
+                        --github-script ${env.serverGithubScriptPath} --mode mcu --workspace ${WORKSPACE}"
+                    }
+                }
+            }
+        }
+        stage('startP2PServer'){
+            agent{
+                node {
+                    label "${env.p2pServer}"
+                }
+            }
+            steps{
+                script{
+                    withEnv(['JENKINS_NODE_COOKIE=dontkill']) {
+                        sh "python ${env.startServerScriptPath} --p2p-server-path ${env.p2pServerPath} \
+                        --owner open-webrtc-toolkit --repo owt-client-native --commit-id ${GIT_COMMIT} \
+                        --git-branch ${GIT_BRANCH} --github-script ${env.serverGithubScriptPath} --mode p2p --workspace ${WORKSPACE}"
+                    }
+                }
+            }
+        }
+        stage('runAndroidCICase'){
+            agent{
+                node {
+                    label "${env.androidRunCaseServer}"
+                }
+            }
+            steps {
+                sh "docker run -v /dev/bus/usb:/dev/bus/usb -v ${env.androidCILogPath}:/home/logs --network host --privileged --rm  ${env.androidSdkImage} \
+                python ${androidSdkTestScript} --git-branch master --git-change-id null --git-commit ${GIT_COMMIT} --owner open-webrtc-toolkit --checks-repo owt-client-native \
+                --project-repo owt-client-android --remote-dependence-host ${env.remoteDependenceHost} --remote-dependence-host-username ${env.remoteDependenceUserName} \
+                --remote-dependence-host-password ${env.remoteDependencePassword} --remote-dependence-path ${env.remoteDependeceDebugPath}  \
+                --instrumentation ${env.androidSdkCaselistPath} --unit --p2p-server ${env.p2pServerUrl} --conference-server-http ${env.mcuServerUrl}"
+            }
+        }
+    }
+    post {
+        always {
+            script {
+                echo "I have finished"
+                sh "curl -H \"Content-Type: application/json\" -X POST --data '{\"commit_id\":\"'$GIT_COMMIT'\",\"job_path\":\"'${env.androidNativeJobName}'\",\"job_name\":\"'$JOB_BASE_NAME'\",\"build_num\":\"'$BUILD_NUMBER'\"}' '${env.checkServerUrl}'/runClient/ANDROID_BUILD_NATIVE_STEPS"
+            }
+        }
+        success {
+            setBuildStatus("${env.nativeUrl}", "Build succeeded", "SUCCESS");
+            echo "I succeeeded!"
+            mail to: "$env.mailtoUser",
+            subject: "Success Pipeline: ${currentBuild.fullDisplayName}",
+            body: "Success with ${env.BUILD_URL}"
+        }
+        unstable {
+            echo "I am unstable :/"
+            mail to: "$env.mailtoUser",
+            subject: "Failed Pipeline: ${currentBuild.fullDisplayName}",
+            body: "Something is wrong with ${env.BUILD_URL}"
+        }
+        failure {
+            setBuildStatus("${env.nativeUrl}", "Build failed", "FAILURE");
+            echo "I failed :("
+            mail to: "$env.mailtoUser",
+            subject: "Failed Pipeline: ${currentBuild.fullDisplayName}",
+            body: "Something is wrong with ${env.BUILD_URL}"
+        }
+    }
+}

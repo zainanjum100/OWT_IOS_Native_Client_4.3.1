@@ -1,0 +1,21 @@
+# Copyright (C) <2018> Intel Corporation
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Contains SSL settings.
+
+declare_args() {
+  # Use external OpenSSL instead of BoringSSL.
+  owt_use_openssl = false
+
+  # External OpenSSL header path
+  owt_openssl_header_root = ""
+
+  # External OpenSSL lib path
+  owt_openssl_lib_root = ""
+}
+
+if (owt_use_openssl) {
+  rtc_ssl_root = owt_openssl_header_root
+  rtc_build_ssl = !owt_use_openssl
+}
